@@ -2,7 +2,7 @@
 
 ## Background
 
-You want a WordPress plugin (**APITS-Mortify-Importer**) that mirrors your public property portfolio on A Place in the Sun (APITS) into your WordPress site by creating one WordPress post per listing and copying over all listing content and images.
+a WordPress plugin (**APITS-Mortify-Importer**) that mirrors your public property portfolio on A Place in the Sun (APITS) into your WordPress site by creating one WordPress post per listing and copying over all listing content and images.
 
 The source portfolio page currently shows ~89 listings for **DCTS Real Estate Development LLC** and each listing has its own detail page (e.g. `.../property/details/ap4093139/...`). ([aplaceinthesun.com](https://www.aplaceinthesun.com/property/agent/521573/dcts-real-estate-development-llc))
 
@@ -224,23 +224,4 @@ orch --> db : record run summary
 @enduml
 ```
 
-### Similar existing solutions
-
-- Many WordPress/WooCommerce plugins use **Action Scheduler** for background job queues, because it provides scalable scheduled/background processing in plugins. ([wordpress.org](https://wordpress.org/plugins/action-scheduler/?utm_source=chatgpt.com))
-
-## Implementation
-
-(TBD)
-
-## Milestones
-
-(TBD)
-
-## Gathering Results
-
-(TBD)
-
-## Need Professional Help in Developing Your Architecture?
-
-Please contact me at [sammuti.com](https://sammuti.com) :)
 
