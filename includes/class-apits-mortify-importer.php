@@ -451,22 +451,7 @@ class APITS_Mortify_Importer
             throw new Exception('Missing portfolio URL');
         }
 
-        $response = wp_remote_get($portfolio_url, [
-            'timeout' => 30,
-            'user-agent' => 'APITS-Mortify-Importer/' . APITS_MORTIFY_IMPORTER_VERSION,
-        ]);
-
-        if (is_wp_error($response)) {
-            throw new Exception($response->get_error_message());
-        }
-
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code < 200 || $code >= 300) {
-            throw new Exception('Portfolio request failed with HTTP ' . $code);
-        }
-
-        $html = wp_remote_retrieve_body($response);
-        $urls = $this->extract_listing_urls($html, $portfolio_url);
+        $urls = $this->collect_portfolio_listing_urls($portfolio_url);
 
         global $wpdb;
         $runs_table = $wpdb->prefix . self::RUNS_TABLE;
@@ -482,6 +467,52 @@ class APITS_Mortify_Importer
         }
 
         $this->enqueue_job($run_id, self::JOB_FINALIZE, [], (count($urls) * $throttle) + 30);
+    }
+
+    private function collect_portfolio_listing_urls($portfolio_url)
+    {
+        $pending_page_urls = [$portfolio_url];
+        $visited_page_urls = [];
+        $listing_urls = [];
+
+        while (! empty($pending_page_urls)) {
+            $page_url = array_shift($pending_page_urls);
+            if (isset($visited_page_urls[$page_url])) {
+                continue;
+            }
+
+            $visited_page_urls[$page_url] = true;
+            $html = $this->fetch_html_or_throw($page_url, 'Portfolio request failed with HTTP ');
+
+            $listing_urls = array_merge($listing_urls, $this->extract_listing_urls($html, $page_url));
+
+            foreach ($this->extract_pagination_urls($html, $portfolio_url) as $next_url) {
+                if (! isset($visited_page_urls[$next_url])) {
+                    $pending_page_urls[] = $next_url;
+                }
+            }
+        }
+
+        return array_values(array_unique(array_filter($listing_urls)));
+    }
+
+    private function fetch_html_or_throw($url, $error_prefix)
+    {
+        $response = wp_remote_get($url, [
+            'timeout' => 30,
+            'user-agent' => 'APITS-Mortify-Importer/' . APITS_MORTIFY_IMPORTER_VERSION,
+        ]);
+
+        if (is_wp_error($response)) {
+            throw new Exception($response->get_error_message());
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            throw new Exception($error_prefix . $code);
+        }
+
+        return wp_remote_retrieve_body($response);
     }
 
     private function extract_listing_urls($html, $base_url)
@@ -503,6 +534,43 @@ class APITS_Mortify_Importer
             }
 
             $urls[] = $this->normalize_url($href, $base_url);
+        }
+
+        return array_values(array_unique(array_filter($urls)));
+    }
+
+    private function extract_pagination_urls($html, $portfolio_url)
+    {
+        $urls = [];
+
+        libxml_use_internal_errors(true);
+        $dom = new DOMDocument();
+        $dom->loadHTML($html);
+        libxml_clear_errors();
+
+        $xpath = new DOMXPath($dom);
+        $nodes = $xpath->query('//a[@href]');
+
+        $portfolio_path = trim((string) wp_parse_url($portfolio_url, PHP_URL_PATH), '/');
+
+        foreach ($nodes as $node) {
+            $href = trim($node->getAttribute('href'));
+            $normalized = $this->normalize_url($href, $portfolio_url);
+
+            if (! $normalized) {
+                continue;
+            }
+
+            $normalized_path = trim((string) wp_parse_url($normalized, PHP_URL_PATH), '/');
+            if ($portfolio_path && strpos($normalized_path, $portfolio_path) !== 0) {
+                continue;
+            }
+
+            if (! preg_match('~/page/(\d+)$~', $normalized_path)) {
+                continue;
+            }
+
+            $urls[] = $normalized;
         }
 
         return array_values(array_unique(array_filter($urls)));
