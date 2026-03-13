@@ -616,7 +616,8 @@ class APITS_Mortify_Importer
 
         $html = wp_remote_retrieve_body($response);
         $data = $this->parse_listing($html, $url);
-        $hash = hash('sha256', wp_json_encode([$data['title'], $data['description'], $data['meta'], $data['images']]));
+        $content = $this->compose_content($data['description'], $data['features'], $data['meta']);
+        $hash = hash('sha256', wp_json_encode([$data['title'], $content, $data['meta'], $data['images']]));
 
         $existing_id = $this->find_existing_post_id($data['meta']['_apits_source_url'], $data['meta']['_apits_listing_ref']);
         $is_new = false;
@@ -651,7 +652,7 @@ class APITS_Mortify_Importer
             wp_update_post([
                 'ID' => $existing_id,
                 'post_title' => $data['title'],
-                'post_content' => $this->compose_content($data['description'], $data['features']),
+                'post_content' => $content,
                 'post_excerpt' => wp_trim_words(wp_strip_all_tags($data['description']), 40),
             ]);
         }
@@ -671,7 +672,7 @@ class APITS_Mortify_Importer
                 $gallery = '[gallery ids="' . implode(',', array_map('intval', $image_ids)) . '"]';
                 wp_update_post([
                     'ID' => $existing_id,
-                    'post_content' => $this->compose_content($data['description'], $data['features']) . "\n\n" . $gallery,
+                    'post_content' => $content . "\n\n" . $gallery,
                 ]);
             }
         }
@@ -762,12 +763,9 @@ class APITS_Mortify_Importer
             $data['meta']['_apits_location_city'] = $tail[2] ?? '';
         }
 
-        if (preg_match('/£\s?([0-9,]+)/', $html, $m)) {
-            $data['meta']['_apits_price_gbp'] = (int) str_replace(',', '', $m[1]);
-        }
-        if (preg_match('/\[(.*?)\]/', $html, $m)) {
-            $data['meta']['_apits_price_alt'] = sanitize_text_field($m[1]);
-        }
+        $prices = $this->extract_prices($xpath, $html);
+        $data['meta']['_apits_price_gbp'] = $prices['gbp'];
+        $data['meta']['_apits_price_alt'] = $prices['alt'];
         if (preg_match('/(\d+)\s*beds?/i', $html, $m)) {
             $data['meta']['_apits_beds'] = (int) $m[1];
         }
@@ -782,6 +780,107 @@ class APITS_Mortify_Importer
         }
 
         return $data;
+    }
+
+    private function extract_prices(DOMXPath $xpath, $html)
+    {
+        $price = [
+            'gbp' => '',
+            'alt' => '',
+        ];
+
+        $priceCandidates = [];
+        $priceNodes = $xpath->query('//*[contains(@class,"price") or contains(@class,"Price") or @itemprop="price"]');
+        foreach ($priceNodes as $node) {
+            $text = trim(wp_strip_all_tags($node->textContent));
+            if ($text) {
+                $priceCandidates[] = $text;
+            }
+        }
+
+        $decodedHtml = html_entity_decode((string) $html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $priceCandidates[] = trim(wp_strip_all_tags($decodedHtml));
+
+        $jsonNodes = $xpath->query('//script[@type="application/ld+json"]');
+        foreach ($jsonNodes as $node) {
+            $json = json_decode($node->textContent, true);
+            if (! $json) {
+                continue;
+            }
+
+            $jsonPrices = $this->extract_prices_from_json($json);
+            if (! $price['gbp'] && ! empty($jsonPrices['gbp'])) {
+                $price['gbp'] = $jsonPrices['gbp'];
+            }
+            if (! $price['alt'] && ! empty($jsonPrices['alt'])) {
+                $price['alt'] = $jsonPrices['alt'];
+            }
+            if ($price['gbp'] && $price['alt']) {
+                break;
+            }
+        }
+
+        foreach ($priceCandidates as $candidate) {
+            if (! $price['gbp'] && preg_match('/(?:£|GBP)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/i', $candidate, $m)) {
+                $normalizedGbp = str_replace(',', '', $m[1]);
+                $price['gbp'] = (int) floor((float) $normalizedGbp);
+            }
+
+            if (! $price['alt'] && preg_match('/[\[(]\s*((?:€|\$|USD|EUR)\s*[0-9][0-9,]*(?:\.\d{1,2})?)\s*[\])]/i', $candidate, $m)) {
+                $price['alt'] = sanitize_text_field($m[1]);
+            }
+
+            if ($price['gbp'] && $price['alt']) {
+                break;
+            }
+        }
+
+        return $price;
+    }
+
+    private function extract_prices_from_json($json)
+    {
+        $price = [
+            'gbp' => '',
+            'alt' => '',
+        ];
+
+        if (! is_array($json)) {
+            return $price;
+        }
+
+        $rawCurrency = strtoupper((string) ($json['priceCurrency'] ?? ''));
+        $rawValue = $json['price'] ?? '';
+        if ($rawCurrency && is_scalar($rawValue)) {
+            $normalized = preg_replace('/[^0-9.]/', '', (string) $rawValue);
+            if ($normalized !== '') {
+                if ($rawCurrency === 'GBP') {
+                    $price['gbp'] = (int) floor((float) $normalized);
+                } elseif (in_array($rawCurrency, ['EUR', 'USD'], true)) {
+                    $symbol = $rawCurrency === 'EUR' ? '€' : '$';
+                    $price['alt'] = $symbol . number_format((float) $normalized, 0, '.', ',');
+                }
+            }
+        }
+
+        foreach ($json as $value) {
+            if (! is_array($value)) {
+                continue;
+            }
+
+            $nested = $this->extract_prices_from_json($value);
+            if (! $price['gbp'] && ! empty($nested['gbp'])) {
+                $price['gbp'] = $nested['gbp'];
+            }
+            if (! $price['alt'] && ! empty($nested['alt'])) {
+                $price['alt'] = $nested['alt'];
+            }
+            if ($price['gbp'] && $price['alt']) {
+                break;
+            }
+        }
+
+        return $price;
     }
 
     private function extract_images(DOMXPath $xpath, $html, $url)
@@ -860,9 +959,21 @@ class APITS_Mortify_Importer
         return $images;
     }
 
-    private function compose_content($description, $features)
+    private function compose_content($description, $features, $meta = [])
     {
         $content = trim($description);
+
+        $priceParts = [];
+        if (! empty($meta['_apits_price_gbp'])) {
+            $priceParts[] = '£' . number_format((int) $meta['_apits_price_gbp']);
+        }
+        if (! empty($meta['_apits_price_alt'])) {
+            $priceParts[] = (string) $meta['_apits_price_alt'];
+        }
+
+        if (! empty($priceParts)) {
+            $content = '<p><strong>Price:</strong> ' . esc_html(implode(' ', $priceParts)) . '</p>' . "\n\n" . $content;
+        }
 
         if (! empty($features)) {
             $content .= "\n\n" . "<h3>Features</h3>\n<ul>";
