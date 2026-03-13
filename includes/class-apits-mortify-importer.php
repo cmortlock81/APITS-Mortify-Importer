@@ -887,6 +887,19 @@ class APITS_Mortify_Importer
     {
         $images = [];
 
+        $galleryNodes = $xpath->query('//main//*[contains(@class,"gallery") or contains(@class,"carousel") or contains(@class,"slider") or contains(@class,"photo") or contains(@class,"image")]//img[@src]');
+        foreach ($galleryNodes as $imgNode) {
+            $src = trim($imgNode->getAttribute('src'));
+            if (! $src || strpos($src, 'data:image') === 0) {
+                continue;
+            }
+
+            $candidate = $this->normalize_url($src, $url);
+            if ($this->is_property_image_url($candidate)) {
+                $images[] = $candidate;
+            }
+        }
+
         $jsonNodes = $xpath->query('//script[@type="application/ld+json"]');
         foreach ($jsonNodes as $node) {
             $json = json_decode($node->textContent, true);
@@ -897,7 +910,7 @@ class APITS_Mortify_Importer
         }
 
         if (empty($images)) {
-            $imgNodes = $xpath->query('//img[@src]');
+            $imgNodes = $xpath->query('//main//img[@src]');
             foreach ($imgNodes as $imgNode) {
                 $src = trim($imgNode->getAttribute('src'));
                 if (! $src) {
@@ -909,12 +922,11 @@ class APITS_Mortify_Importer
                 if (strpos($src, 'placeholder') !== false) {
                     continue;
                 }
-                $images[] = $this->normalize_url($src, $url);
+                $candidate = $this->normalize_url($src, $url);
+                if ($this->is_property_image_url($candidate, $imgNode)) {
+                    $images[] = $candidate;
+                }
             }
-        }
-
-        if (preg_match_all('~https?://[^\"\']+\.(?:jpg|jpeg|png|webp)~i', $html, $m)) {
-            $images = array_merge($images, $m[0]);
         }
 
         $normalized = [];
@@ -924,7 +936,7 @@ class APITS_Mortify_Importer
                 continue;
             }
             $image = preg_replace('/\?.*$/', '', $image);
-            if ($image) {
+            if ($image && $this->is_property_image_url($image)) {
                 $normalized[] = $image;
             }
         }
@@ -940,11 +952,15 @@ class APITS_Mortify_Importer
             foreach ($json as $key => $value) {
                 if ($key === 'image') {
                     if (is_string($value)) {
-                        $images[] = $value;
+                        if ($this->is_property_image_url($value)) {
+                            $images[] = $value;
+                        }
                     } elseif (is_array($value)) {
                         foreach ($value as $v) {
                             if (is_string($v)) {
-                                $images[] = $v;
+                                if ($this->is_property_image_url($v)) {
+                                    $images[] = $v;
+                                }
                             }
                         }
                     }
@@ -957,6 +973,57 @@ class APITS_Mortify_Importer
         }
 
         return $images;
+    }
+
+    private function is_property_image_url($url, DOMElement $imgNode = null)
+    {
+        $url = strtolower((string) $url);
+        if (! $url) {
+            return false;
+        }
+
+        if (! preg_match('/\.(?:jpg|jpeg|png|webp)(?:$|\?)/i', $url)) {
+            return false;
+        }
+
+        $blockedPatterns = [
+            'logo',
+            'icon',
+            'sprite',
+            'avatar',
+            'placeholder',
+            'tracking',
+            'pixel',
+            '/flags/',
+        ];
+
+        foreach ($blockedPatterns as $pattern) {
+            if (strpos($url, $pattern) !== false) {
+                return false;
+            }
+        }
+
+        if ($imgNode instanceof DOMElement) {
+            $parentClass = '';
+            if ($imgNode->parentNode instanceof DOMElement) {
+                $parentClass = $imgNode->parentNode->getAttribute('class');
+            }
+
+            $context = strtolower(
+                trim(
+                    $imgNode->getAttribute('class') . ' ' .
+                    $imgNode->getAttribute('alt') . ' ' .
+                    $imgNode->getAttribute('id') . ' ' .
+                    $parentClass
+                )
+            );
+
+            if (preg_match('/logo|icon|avatar|author|flag|badge/', $context)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function compose_content($description, $features, $meta = [])
