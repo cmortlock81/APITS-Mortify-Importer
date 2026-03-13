@@ -802,7 +802,8 @@ class APITS_Mortify_Importer
 
         foreach ($priceCandidates as $candidate) {
             if (! $price['gbp'] && preg_match('/(?:£|GBP)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/i', $candidate, $m)) {
-                $price['gbp'] = (int) preg_replace('/[^0-9]/', '', $m[1]);
+                $normalizedGbp = str_replace(',', '', $m[1]);
+                $price['gbp'] = (int) floor((float) $normalizedGbp);
             }
 
             if (! $price['alt'] && preg_match('/[\[(]\s*((?:€|\$|USD|EUR)\s*[0-9][0-9,]*(?:\.\d{1,2})?)\s*[\])]/i', $candidate, $m)) {
