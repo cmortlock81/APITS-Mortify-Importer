@@ -762,12 +762,9 @@ class APITS_Mortify_Importer
             $data['meta']['_apits_location_city'] = $tail[2] ?? '';
         }
 
-        if (preg_match('/£\s?([0-9,]+)/', $html, $m)) {
-            $data['meta']['_apits_price_gbp'] = (int) str_replace(',', '', $m[1]);
-        }
-        if (preg_match('/\[(.*?)\]/', $html, $m)) {
-            $data['meta']['_apits_price_alt'] = sanitize_text_field($m[1]);
-        }
+        $prices = $this->extract_prices($xpath, $html);
+        $data['meta']['_apits_price_gbp'] = $prices['gbp'];
+        $data['meta']['_apits_price_alt'] = $prices['alt'];
         if (preg_match('/(\d+)\s*beds?/i', $html, $m)) {
             $data['meta']['_apits_beds'] = (int) $m[1];
         }
@@ -782,6 +779,42 @@ class APITS_Mortify_Importer
         }
 
         return $data;
+    }
+
+    private function extract_prices(DOMXPath $xpath, $html)
+    {
+        $price = [
+            'gbp' => '',
+            'alt' => '',
+        ];
+
+        $priceCandidates = [];
+        $priceNodes = $xpath->query('//*[contains(@class,"price") or contains(@class,"Price") or @itemprop="price"]');
+        foreach ($priceNodes as $node) {
+            $text = trim(wp_strip_all_tags($node->textContent));
+            if ($text) {
+                $priceCandidates[] = $text;
+            }
+        }
+
+        $decodedHtml = html_entity_decode((string) $html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $priceCandidates[] = trim(wp_strip_all_tags($decodedHtml));
+
+        foreach ($priceCandidates as $candidate) {
+            if (! $price['gbp'] && preg_match('/(?:£|GBP)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/i', $candidate, $m)) {
+                $price['gbp'] = (int) preg_replace('/[^0-9]/', '', $m[1]);
+            }
+
+            if (! $price['alt'] && preg_match('/[\[(]\s*((?:€|\$|USD|EUR)\s*[0-9][0-9,]*(?:\.\d{1,2})?)\s*[\])]/i', $candidate, $m)) {
+                $price['alt'] = sanitize_text_field($m[1]);
+            }
+
+            if ($price['gbp'] && $price['alt']) {
+                break;
+            }
+        }
+
+        return $price;
     }
 
     private function extract_images(DOMXPath $xpath, $html, $url)
