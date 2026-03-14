@@ -135,6 +135,11 @@ class APITS_Mortify_Importer
 
         $fields = [
             'portfolio_url' => __('Portfolio URL', 'apits-mortify-importer'),
+            'portfolio_url_2' => __('Portfolio URL 2', 'apits-mortify-importer'),
+            'portfolio_url_3' => __('Portfolio URL 3', 'apits-mortify-importer'),
+            'portfolio_url_4' => __('Portfolio URL 4', 'apits-mortify-importer'),
+            'portfolio_url_5' => __('Portfolio URL 5', 'apits-mortify-importer'),
+            'portfolio_url_6' => __('Portfolio URL 6', 'apits-mortify-importer'),
             'post_status' => __('Post Status on Create', 'apits-mortify-importer'),
             'update_behavior' => __('Update Behavior', 'apits-mortify-importer'),
             'archive_behavior' => __('Archive Behavior', 'apits-mortify-importer'),
@@ -159,7 +164,10 @@ class APITS_Mortify_Importer
         $defaults = $this->get_settings();
         $output = [];
 
-        $output['portfolio_url'] = isset($input['portfolio_url']) ? esc_url_raw(trim($input['portfolio_url'])) : $defaults['portfolio_url'];
+        $portfolio_keys = ['portfolio_url', 'portfolio_url_2', 'portfolio_url_3', 'portfolio_url_4', 'portfolio_url_5', 'portfolio_url_6'];
+        foreach ($portfolio_keys as $portfolio_key) {
+            $output[$portfolio_key] = isset($input[$portfolio_key]) ? esc_url_raw(trim($input[$portfolio_key])) : $defaults[$portfolio_key];
+        }
         $output['post_status'] = in_array($input['post_status'] ?? '', ['draft', 'publish'], true) ? $input['post_status'] : 'draft';
         $output['update_behavior'] = in_array($input['update_behavior'] ?? '', ['full', 'meta_only'], true) ? $input['update_behavior'] : 'full';
         $output['archive_behavior'] = in_array($input['archive_behavior'] ?? '', ['draft', 'archived'], true) ? $input['archive_behavior'] : 'draft';
@@ -173,6 +181,11 @@ class APITS_Mortify_Importer
     {
         $defaults = [
             'portfolio_url' => 'https://www.aplaceinthesun.com/property/agent/521573/dcts-real-estate-development-llc',
+            'portfolio_url_2' => '',
+            'portfolio_url_3' => '',
+            'portfolio_url_4' => '',
+            'portfolio_url_5' => '',
+            'portfolio_url_6' => '',
             'post_status' => 'draft',
             'update_behavior' => 'full',
             'archive_behavior' => 'draft',
@@ -188,7 +201,7 @@ class APITS_Mortify_Importer
         $settings = $this->get_settings();
         $key = $args['key'];
 
-        if ($key === 'portfolio_url') {
+        if (strpos($key, 'portfolio_url') === 0) {
             printf('<input type="url" name="apits_mortify_importer_settings[%1$s]" value="%2$s" class="regular-text" />', esc_attr($key), esc_attr($settings[$key]));
             return;
         }
@@ -342,7 +355,7 @@ class APITS_Mortify_Importer
 
         $run_id = (int) $wpdb->insert_id;
         $this->enqueue_job($run_id, self::JOB_DISCOVER, [
-            'portfolio_url' => $this->get_settings()['portfolio_url'],
+            'portfolio_urls' => $this->get_portfolio_urls(),
         ]);
     }
 
@@ -446,12 +459,33 @@ class APITS_Mortify_Importer
 
     private function run_discover_job($run_id, $payload)
     {
-        $portfolio_url = esc_url_raw($payload['portfolio_url'] ?? '');
-        if (! $portfolio_url) {
+        $portfolio_urls = [];
+        if (! empty($payload['portfolio_urls']) && is_array($payload['portfolio_urls'])) {
+            foreach ($payload['portfolio_urls'] as $portfolio_url) {
+                $cleaned = esc_url_raw($portfolio_url);
+                if ($cleaned) {
+                    $portfolio_urls[] = $cleaned;
+                }
+            }
+        }
+
+        if (empty($portfolio_urls) && ! empty($payload['portfolio_url'])) {
+            $legacy_url = esc_url_raw($payload['portfolio_url']);
+            if ($legacy_url) {
+                $portfolio_urls[] = $legacy_url;
+            }
+        }
+
+        if (empty($portfolio_urls)) {
             throw new Exception('Missing portfolio URL');
         }
 
-        $urls = $this->collect_portfolio_listing_urls($portfolio_url);
+        $urls = [];
+        foreach ($portfolio_urls as $portfolio_url) {
+            foreach ($this->collect_portfolio_listing_urls($portfolio_url) as $listing_url) {
+                $urls[$listing_url] = $portfolio_url;
+            }
+        }
 
         global $wpdb;
         $runs_table = $wpdb->prefix . self::RUNS_TABLE;
@@ -461,9 +495,9 @@ class APITS_Mortify_Importer
         $settings = $this->get_settings();
         $throttle = max(1, (int) $settings['throttle_seconds']);
 
-        foreach (array_values($urls) as $index => $url) {
+        foreach (array_keys($urls) as $index => $url) {
             $delay = $index * $throttle + wp_rand(0, 2);
-            $this->enqueue_job($run_id, self::JOB_IMPORT_LISTING, ['url' => $url], $delay);
+            $this->enqueue_job($run_id, self::JOB_IMPORT_LISTING, ['url' => $url, 'portfolio_url' => $urls[$url]], $delay);
         }
 
         $this->enqueue_job($run_id, self::JOB_FINALIZE, [], (count($urls) * $throttle) + 30);
@@ -615,7 +649,8 @@ class APITS_Mortify_Importer
         }
 
         $html = wp_remote_retrieve_body($response);
-        $data = $this->parse_listing($html, $url);
+        $source_portfolio_url = esc_url_raw($payload['portfolio_url'] ?? '');
+        $data = $this->parse_listing($html, $url, $source_portfolio_url);
         $content = $this->compose_content($data['description'], $data['features'], $data['meta']);
         $hash = hash('sha256', wp_json_encode([$data['title'], $content, $data['meta'], $data['images']]));
 
@@ -684,8 +719,13 @@ class APITS_Mortify_Importer
         $this->increment_run_counter($run_id, $is_new ? 'total_created' : 'total_updated', 1);
     }
 
-    private function parse_listing($html, $url)
+    private function parse_listing($html, $url, $portfolio_url = '')
     {
+        $agent_id = $this->extract_agent_id($portfolio_url);
+        if (! $agent_id) {
+            $agent_id = $this->extract_agent_id($this->get_settings()['portfolio_url']);
+        }
+
         $data = [
             'title' => '',
             'description' => '',
@@ -694,7 +734,7 @@ class APITS_Mortify_Importer
             'meta' => [
                 '_apits_source_url' => $url,
                 '_apits_listing_ref' => '',
-                '_apits_agent_id' => $this->extract_agent_id($this->get_settings()['portfolio_url']),
+                '_apits_agent_id' => $agent_id,
                 '_apits_price_gbp' => '',
                 '_apits_price_alt' => '',
                 '_apits_beds' => '',
@@ -1194,7 +1234,21 @@ class APITS_Mortify_Importer
             throw new Exception('Run not found in finalize');
         }
 
-        $agent_id = $this->extract_agent_id($this->get_settings()['portfolio_url']);
+        $agent_ids = array_values(array_filter(array_unique(array_map([$this, 'extract_agent_id'], $this->get_portfolio_urls()))));
+        if (empty($agent_ids)) {
+            $wpdb->update($runs_table, [
+                'status' => ((int) $run['total_failed'] > 0) ? 'partial' : 'success',
+                'finished_at' => current_time('mysql'),
+                'total_archived' => 0,
+            ], ['id' => $run_id]);
+
+            return;
+        }
+
+        $agent_query = ['relation' => 'OR'];
+        foreach ($agent_ids as $agent_id) {
+            $agent_query[] = ['key' => '_apits_agent_id', 'value' => $agent_id];
+        }
 
         $args = [
             'post_type' => self::CPT,
@@ -1202,7 +1256,7 @@ class APITS_Mortify_Importer
             'posts_per_page' => -1,
             'fields' => 'ids',
             'meta_query' => [
-                ['key' => '_apits_agent_id', 'value' => $agent_id],
+                $agent_query,
                 ['key' => '_apits_last_seen_at', 'value' => $run['started_at'], 'compare' => '<', 'type' => 'DATETIME'],
             ],
         ];
@@ -1230,6 +1284,22 @@ class APITS_Mortify_Importer
         }
 
         return '';
+    }
+
+    private function get_portfolio_urls()
+    {
+        $settings = $this->get_settings();
+        $keys = ['portfolio_url', 'portfolio_url_2', 'portfolio_url_3', 'portfolio_url_4', 'portfolio_url_5', 'portfolio_url_6'];
+        $urls = [];
+
+        foreach ($keys as $key) {
+            $url = esc_url_raw($settings[$key] ?? '');
+            if ($url) {
+                $urls[] = $url;
+            }
+        }
+
+        return array_values(array_unique($urls));
     }
 
     private function increment_run_counter($run_id, $column, $by)
