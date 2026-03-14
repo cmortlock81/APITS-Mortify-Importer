@@ -3,7 +3,7 @@
  * Plugin Name: APITS Mortify Importer
  * Description: Imports APITS agent listings into WordPress posts with images and keeps them in sync.
  * Version: 1.0.0
- * Author: APITS
+ * Author: Mortify
  * Text Domain: apits-mortify-importer
  */
 
