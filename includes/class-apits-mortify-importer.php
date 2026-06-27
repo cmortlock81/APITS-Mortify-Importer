@@ -806,12 +806,10 @@ class APITS_Mortify_Importer
         $prices = $this->extract_prices($xpath, $html);
         $data['meta']['_apits_price_gbp'] = $prices['gbp'];
         $data['meta']['_apits_price_alt'] = $prices['alt'];
-        if (preg_match('/(\d+)\s*beds?/i', $html, $m)) {
-            $data['meta']['_apits_beds'] = (int) $m[1];
-        }
-        if (preg_match('/(\d+)\s*baths?/i', $html, $m)) {
-            $data['meta']['_apits_baths'] = (int) $m[1];
-        }
+
+        $bedBathCounts = $this->extract_bed_bath_counts($xpath, $html);
+        $data['meta']['_apits_beds'] = $bedBathCounts['beds'];
+        $data['meta']['_apits_baths'] = $bedBathCounts['baths'];
 
         $data['images'] = $this->extract_images($xpath, $html, $url);
 
@@ -820,6 +818,108 @@ class APITS_Mortify_Importer
         }
 
         return $data;
+    }
+
+    private function extract_bed_bath_counts(DOMXPath $xpath, $html)
+    {
+        $counts = [
+            'beds' => '',
+            'baths' => '',
+        ];
+
+        $candidates = [];
+
+        $detailNodes = $xpath->query('//*[contains(@class,"property-details") or contains(@class,"propertyDetails") or contains(@class,"details") or contains(@class,"features")]//li | //*[contains(@class,"property-details") or contains(@class,"propertyDetails") or contains(@class,"details") or contains(@class,"features")]//*[self::span or self::div or self::p]');
+        foreach ($detailNodes as $node) {
+            $text = trim(preg_replace('/\s+/', ' ', wp_strip_all_tags($node->textContent)));
+            if ($text) {
+                $candidates[] = $text;
+            }
+        }
+
+        $decodedHtml = html_entity_decode((string) $html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $plainText = trim(preg_replace('/\s+/', ' ', wp_strip_all_tags($decodedHtml)));
+        if ($plainText) {
+            $candidates[] = $plainText;
+        }
+
+        $jsonNodes = $xpath->query('//script[@type="application/ld+json"]');
+        foreach ($jsonNodes as $node) {
+            $json = json_decode($node->textContent, true);
+            if (! $json) {
+                continue;
+            }
+
+            $jsonCounts = $this->extract_bed_bath_counts_from_json($json);
+            if ($counts['beds'] === '' && $jsonCounts['beds'] !== '') {
+                $counts['beds'] = $jsonCounts['beds'];
+            }
+            if ($counts['baths'] === '' && $jsonCounts['baths'] !== '') {
+                $counts['baths'] = $jsonCounts['baths'];
+            }
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($counts['beds'] === '' && preg_match('/(?:bedrooms?|beds?)\s*[:：-]?\s*(\d+)|(?:^|\D)(\d+)\s*(?:bedrooms?|beds?)(?:\D|$)/i', $candidate, $m)) {
+                $counts['beds'] = (int) (! empty($m[1]) ? $m[1] : $m[2]);
+            }
+
+            if ($counts['baths'] === '' && preg_match('/(?:bathrooms?|baths?)\s*[:：-]?\s*(\d+)|(?:^|\D)(\d+)\s*(?:bathrooms?|baths?)(?:\D|$)/i', $candidate, $m)) {
+                $counts['baths'] = (int) (! empty($m[1]) ? $m[1] : $m[2]);
+            }
+
+            if ($counts['beds'] !== '' && $counts['baths'] !== '') {
+                break;
+            }
+        }
+
+        return $counts;
+    }
+
+    private function extract_bed_bath_counts_from_json($json)
+    {
+        $counts = [
+            'beds' => '',
+            'baths' => '',
+        ];
+
+        if (! is_array($json)) {
+            return $counts;
+        }
+
+        foreach ($json as $key => $value) {
+            $normalizedKey = strtolower((string) $key);
+
+            if ($counts['beds'] === '' && is_scalar($value) && preg_match('/bed(?:room)?s?/', $normalizedKey)) {
+                $normalizedValue = preg_replace('/[^0-9]/', '', (string) $value);
+                if ($normalizedValue !== '') {
+                    $counts['beds'] = (int) $normalizedValue;
+                }
+            }
+
+            if ($counts['baths'] === '' && is_scalar($value) && preg_match('/bath(?:room)?s?/', $normalizedKey)) {
+                $normalizedValue = preg_replace('/[^0-9]/', '', (string) $value);
+                if ($normalizedValue !== '') {
+                    $counts['baths'] = (int) $normalizedValue;
+                }
+            }
+
+            if (is_array($value)) {
+                $nested = $this->extract_bed_bath_counts_from_json($value);
+                if ($counts['beds'] === '' && $nested['beds'] !== '') {
+                    $counts['beds'] = $nested['beds'];
+                }
+                if ($counts['baths'] === '' && $nested['baths'] !== '') {
+                    $counts['baths'] = $nested['baths'];
+                }
+            }
+
+            if ($counts['beds'] !== '' && $counts['baths'] !== '') {
+                break;
+            }
+        }
+
+        return $counts;
     }
 
     private function extract_prices(DOMXPath $xpath, $html)
@@ -1080,6 +1180,18 @@ class APITS_Mortify_Importer
 
         if (! empty($priceParts)) {
             $content = '<p><strong>Price:</strong> ' . esc_html(implode(' ', $priceParts)) . '</p>' . "\n\n" . $content;
+        }
+
+        $propertyDetails = [];
+        if (isset($meta['_apits_beds']) && $meta['_apits_beds'] !== '') {
+            $propertyDetails[] = '<strong>Bedrooms:</strong> ' . (int) $meta['_apits_beds'];
+        }
+        if (isset($meta['_apits_baths']) && $meta['_apits_baths'] !== '') {
+            $propertyDetails[] = '<strong>Bathrooms:</strong> ' . (int) $meta['_apits_baths'];
+        }
+
+        if (! empty($propertyDetails)) {
+            $content = '<p>' . implode(' &nbsp; ', $propertyDetails) . '</p>' . "\n\n" . $content;
         }
 
         if (! empty($features)) {
