@@ -764,7 +764,7 @@ class APITS_Mortify_Importer
 
         $descNode = $xpath->query('//div[contains(@class,"description") or contains(@class,"property-description") or @id="description"]')->item(0);
         if ($descNode) {
-            $data['description'] = trim(wp_strip_all_tags($dom->saveHTML($descNode), true));
+            $data['description'] = $this->extract_readable_description($dom->saveHTML($descNode));
         }
         if (! $data['description']) {
             $paragraphs = $xpath->query('//main//p');
@@ -818,6 +818,63 @@ class APITS_Mortify_Importer
         }
 
         return $data;
+    }
+
+    private function extract_readable_description($html)
+    {
+        $text = html_entity_decode((string) $html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        $text = preg_replace('/<\s*br\s*\/?\s*>/i', "\n", $text);
+        $text = preg_replace('/<\s*\/?\s*(p|div|section|article|header|footer|h[1-6]|tr|table|blockquote)\b[^>]*>/i', "\n\n", $text);
+        $text = preg_replace('/<\s*li\b[^>]*>/i', "\n- ", $text);
+        $text = preg_replace('/<\s*\/?\s*(ul|ol)\b[^>]*>/i', "\n", $text);
+        $text = wp_strip_all_tags($text, true);
+
+        $lines = preg_split('/\R+/', $text);
+        $lines = array_map(static function ($line) {
+            return trim(preg_replace('/[ \t]+/', ' ', $line));
+        }, $lines);
+        $lines = array_values(array_filter($lines, static function ($line) {
+            return $line !== '';
+        }));
+
+        return trim(implode("\n\n", $lines));
+    }
+
+    private function format_description_for_content($description)
+    {
+        $description = trim((string) $description);
+        if ($description === '') {
+            return '';
+        }
+
+        $blocks = preg_split('/\R{2,}/', $description);
+        $content = '';
+
+        foreach ($blocks as $block) {
+            $block = trim($block);
+            if ($block === '') {
+                continue;
+            }
+
+            $lines = preg_split('/\R/', $block);
+            $isList = ! empty($lines) && count($lines) === count(array_filter($lines, static function ($line) {
+                return preg_match('/^[-*•]\s+/', trim($line));
+            }));
+
+            if ($isList) {
+                $content .= "<ul>\n";
+                foreach ($lines as $line) {
+                    $content .= '<li>' . esc_html(preg_replace('/^[-*•]\s+/', '', trim($line))) . '</li>' . "\n";
+                }
+                $content .= "</ul>\n\n";
+                continue;
+            }
+
+            $content .= '<p>' . nl2br(esc_html($block), false) . '</p>' . "\n\n";
+        }
+
+        return trim($content);
     }
 
     private function extract_bed_bath_counts(DOMXPath $xpath, $html)
@@ -1168,7 +1225,7 @@ class APITS_Mortify_Importer
 
     private function compose_content($description, $features, $meta = [])
     {
-        $content = trim($description);
+        $content = $this->format_description_for_content($description);
 
         $priceParts = [];
         if (! empty($meta['_apits_price_gbp'])) {
