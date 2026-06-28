@@ -612,6 +612,17 @@ class APITS_Mortify_Importer
 
     private function normalize_url($href, $base_url)
     {
+        $href = trim(html_entity_decode((string) $href, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        if ($href === '' || strpos($href, 'data:') === 0 || strpos($href, 'blob:') === 0) {
+            return '';
+        }
+
+        if (strpos($href, '//') === 0) {
+            $base = wp_parse_url($base_url);
+            $scheme = (! empty($base['scheme'])) ? $base['scheme'] : 'https';
+            return esc_url_raw($scheme . ':' . $href);
+        }
+
         if (strpos($href, 'http') === 0) {
             return esc_url_raw($href);
         }
@@ -678,6 +689,16 @@ class APITS_Mortify_Importer
         update_post_meta($existing_id, '_apits_run_id', $run_id);
 
         if ($existing_hash === $hash) {
+            $existing_image_ids = json_decode((string) get_post_meta($existing_id, '_apits_image_ids', true), true);
+            if (! empty($data['images']) && empty($existing_image_ids)) {
+                $image_ids = $this->import_images($existing_id, $data['images']);
+                update_post_meta($existing_id, '_apits_image_ids', wp_json_encode($image_ids));
+
+                if (! empty($image_ids)) {
+                    set_post_thumbnail($existing_id, $image_ids[0]);
+                }
+            }
+
             $this->increment_run_counter($run_id, 'total_processed', 1);
             return;
         }
@@ -1084,14 +1105,16 @@ class APITS_Mortify_Importer
     {
         $images = [];
 
-        $galleryNodes = $xpath->query('//main//*[contains(@class,"gallery") or contains(@class,"carousel") or contains(@class,"slider") or contains(@class,"photo") or contains(@class,"image")]//img[@src]');
+        $galleryNodes = $xpath->query('//main//*[contains(@class,"gallery") or contains(@class,"carousel") or contains(@class,"slider") or contains(@class,"photo") or contains(@class,"image")]//img');
         foreach ($galleryNodes as $imgNode) {
-            $src = trim($imgNode->getAttribute('src'));
-            if (! $src || strpos($src, 'data:image') === 0) {
-                continue;
+            foreach ($this->extract_image_candidates_from_node($imgNode, $url) as $candidate) {
+                if ($this->is_property_image_url($candidate, $imgNode)) {
+                    $images[] = $candidate;
+                }
             }
+        }
 
-            $candidate = $this->normalize_url($src, $url);
+        foreach ($this->extract_image_urls_from_html($html, $url) as $candidate) {
             if ($this->is_property_image_url($candidate)) {
                 $images[] = $candidate;
             }
@@ -1107,21 +1130,12 @@ class APITS_Mortify_Importer
         }
 
         if (empty($images)) {
-            $imgNodes = $xpath->query('//main//img[@src]');
+            $imgNodes = $xpath->query('//main//img');
             foreach ($imgNodes as $imgNode) {
-                $src = trim($imgNode->getAttribute('src'));
-                if (! $src) {
-                    continue;
-                }
-                if (strpos($src, 'data:image') === 0) {
-                    continue;
-                }
-                if (strpos($src, 'placeholder') !== false) {
-                    continue;
-                }
-                $candidate = $this->normalize_url($src, $url);
-                if ($this->is_property_image_url($candidate, $imgNode)) {
-                    $images[] = $candidate;
+                foreach ($this->extract_image_candidates_from_node($imgNode, $url) as $candidate) {
+                    if ($this->is_property_image_url($candidate, $imgNode)) {
+                        $images[] = $candidate;
+                    }
                 }
             }
         }
@@ -1132,13 +1146,78 @@ class APITS_Mortify_Importer
             if (! $image) {
                 continue;
             }
-            $image = preg_replace('/\?.*$/', '', $image);
             if ($image && $this->is_property_image_url($image)) {
                 $normalized[] = $image;
             }
         }
 
         return array_values(array_unique($normalized));
+    }
+
+    private function extract_image_candidates_from_node(DOMElement $imgNode, $base_url)
+    {
+        $candidates = [];
+        $attributes = ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-url'];
+
+        foreach ($attributes as $attribute) {
+            $value = trim($imgNode->getAttribute($attribute));
+            if ($value) {
+                $candidates[] = $this->normalize_url($value, $base_url);
+            }
+        }
+
+        foreach (['srcset', 'data-srcset', 'data-lazy-srcset'] as $attribute) {
+            $srcset = trim($imgNode->getAttribute($attribute));
+            if (! $srcset) {
+                continue;
+            }
+
+            $srcset_candidates = $this->parse_srcset_urls($srcset);
+            foreach ($srcset_candidates as $srcset_candidate) {
+                $candidates[] = $this->normalize_url($srcset_candidate, $base_url);
+            }
+        }
+
+        return array_values(array_filter(array_unique($candidates)));
+    }
+
+    private function parse_srcset_urls($srcset)
+    {
+        $urls = [];
+        foreach (explode(',', (string) $srcset) as $candidate) {
+            $parts = preg_split('/\s+/', trim($candidate));
+            if (! empty($parts[0])) {
+                $urls[] = $parts[0];
+            }
+        }
+
+        return $urls;
+    }
+
+    private function extract_image_urls_from_html($html, $base_url)
+    {
+        $images = [];
+        $decoded = html_entity_decode((string) $html, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        if (preg_match_all("#https?:\\\\?/\\\\?/[^\\s\"']+\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\s\"']*)?#i", $decoded, $matches)) {
+            foreach ($matches[0] as $match) {
+                $images[] = str_replace('\\/', '/', $match);
+            }
+        }
+
+        if (preg_match_all("#(?<!:)//[^\\s\"']+\\.(?:jpg|jpeg|png|webp)(?:\\?[^\\s\"']*)?#i", $decoded, $matches)) {
+            foreach ($matches[0] as $match) {
+                $images[] = $this->normalize_url(str_replace('\\/', '/', $match), $base_url);
+            }
+        }
+
+        if (preg_match_all("#(?:background-image\\s*:\\s*url\\(|data-background(?:-image)?=)[\"']?([^\"')]+)[\"']?#i", $decoded, $matches)) {
+            foreach ($matches[1] as $match) {
+                $images[] = $this->normalize_url($match, $base_url);
+            }
+        }
+
+        return array_values(array_filter(array_unique($images)));
     }
 
     private function extract_images_from_json($json)
