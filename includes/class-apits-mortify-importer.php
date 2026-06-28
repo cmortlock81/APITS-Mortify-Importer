@@ -870,7 +870,8 @@ class APITS_Mortify_Importer
         }
 
         $blocks = preg_split('/\R{2,}/', $description);
-        $content = '';
+        $content = '<h2 style="color: #ff8a00; font-size: 21px; font-weight: 400; margin: 0 0 20px;">' . esc_html__('Full Description', 'apits-mortify-importer') . '</h2>' . "\n";
+        $content .= '<hr style="border: 0; border-top: 1px solid #d7d7d7; margin: 0 0 36px;" />' . "\n\n";
 
         foreach ($blocks as $block) {
             $block = trim($block);
@@ -884,15 +885,15 @@ class APITS_Mortify_Importer
             }));
 
             if ($isList) {
-                $content .= "<ul>\n";
+                $content .= "<ul style=\"margin: 0 0 24px 20px; padding: 0;\">\n";
                 foreach ($lines as $line) {
-                    $content .= '<li>' . esc_html(preg_replace('/^[-*•]\s+/', '', trim($line))) . '</li>' . "\n";
+                    $content .= '<li style="margin: 0 0 10px;">' . esc_html(preg_replace('/^[-*•]\s+/', '', trim($line))) . '</li>' . "\n";
                 }
                 $content .= "</ul>\n\n";
                 continue;
             }
 
-            $content .= '<p>' . nl2br(esc_html($block), false) . '</p>' . "\n\n";
+            $content .= '<p style="margin: 0 0 24px; line-height: 1.5;">' . nl2br(esc_html($block), false) . '</p>' . "\n\n";
         }
 
         return trim($content);
